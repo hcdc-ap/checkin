@@ -469,3 +469,354 @@ function buildEmployeeDropdown(employeeList, selected) {
         select.value = ''; // Ensure "All" is selected if no specific employee
     }
 }
+/*
+* Client-side JavaScript for check-in, map display, and Highcharts heatmap
+* Updated to refresh both map and Highcharts heatmap after check-in
+*/
+
+// Global variables
+let latitude, longitude, accuracy;
+
+// Constants from index.html (these are populated by GAS templating)
+// For a static GitHub Pages site, you'd hardcode or mock these for display purposes.
+let OFFICE_LATITUDE = window.OFFICE_LATITUDE;
+let OFFICE_LONGITUDE = window.OFFICE_LONGITUDE;
+let ACCEPTABLE_RADIUS_METERS = window.ACCEPTABLE_RADIUS_METERS;
+let LOW_ACCURACY_THRESHOLD_FACTOR = window.LOW_ACCURACY_THRESHOLD_FACTOR;
+
+// Function to display status messages
+function showMessage(text, type = 'info') {
+  //console.log(`showMessage: ${text} (${type})`);
+  const messageDiv = document.getElementById('message');
+  messageDiv.textContent = text;
+  messageDiv.className = 'message'; // Reset classes
+  if (type === 'error') {
+    messageDiv.classList.add('error');
+  } else if (type === 'success') {
+    messageDiv.classList.add('success');
+  } else if (type === 'loading') {
+    messageDiv.classList.add('loading');
+  }
+  messageDiv.style.display = text ? 'block' : 'none';
+}
+
+// Initialize the page with employee ID and code
+function initializePage() {
+  //console.log('Initial employeeId:', initialEmployeeId);
+  // initialEmployeeId and initialCheckinCode are populated by GAS template
+  if (!initialEmployeeId || !initialCheckinCode) {
+    showMessage('Employee ID or attendance code is missing. Please use the link from email.', 'error');
+    document.getElementById('employeeIdDisplay').textContent = 'N/A';
+    document.getElementById('checkinCodeDisplay').textContent = 'N/A';
+    document.getElementById('employeeName').textContent = 'N/A';
+    document.getElementById('ipAddress').textContent = 'N/A';
+    document.getElementById('currentAddress').textContent = 'N/A';
+    document.getElementById('checkinButton').disabled = true;
+    return;
+  }
+  showMessage('Loading information...', 'loading');
+  document.getElementById('checkinButton').disabled = true;
+  document.getElementById('employeeIdDisplay').textContent = initialEmployeeId;
+  document.getElementById('checkinCodeDisplay').textContent = initialCheckinCode;
+
+  // Call GAS server-side function to get employee name
+  google.script.run
+    .withSuccessHandler(function(name) {
+      document.getElementById('employeeName').textContent = name || 'Name not found';
+      getIpAddress(); // Proceed to get IP after name is loaded
+    })
+    .withFailureHandler(function(error) {
+      //console.log('Error loading employee name:', error);
+      showMessage('Error loading employee name: ' + error.message, 'error');
+      document.getElementById('employeeName').textContent = 'Error!';
+      getIpAddress(); // Still try to get IP even if name fails
+    })
+    .getEmployeeNameById(initialEmployeeId);
+}
+
+// Get IP address
+function getIpAddress() {
+  google.script.run
+    .withSuccessHandler(function(ip) {
+      document.getElementById('ipAddress').textContent = ip || 'N/A';
+      getGeolocation(); // Proceed to get geolocation after IP is loaded
+    })
+    .withFailureHandler(function(error) {
+      //console.log('Error loading IP address:', error);
+      showMessage('Error loading IP address: ' + error.message, 'error');
+      document.getElementById('ipAddress').textContent = 'N/A';
+      getGeolocation(); // Still try to get geolocation even if IP fails
+    })
+    .getUserIpAddress();
+}
+
+// Calculate distance between two points (Haversine formula)
+function calculateDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3; // metres
+  const φ1 = lat1 * Math.PI / 180;
+  const φ2 = lat2 * Math.PI / 180;
+  const Δφ = (lat2 - lat1) * Math.PI / 180;
+  const Δλ = (lon2 - lon1) * Math.PI / 180;
+
+  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
+    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // in metres
+}
+
+// Get GPS location
+function getGeolocation() {
+  if (navigator.geolocation) {
+    showMessage('Getting your current location...', 'loading');
+    document.getElementById('checkinButton').disabled = true;
+    navigator.geolocation.getCurrentPosition(
+      function(position) {
+        latitude = position.coords.latitude;
+        longitude = position.coords.longitude;
+        accuracy = position.coords.accuracy;
+
+        document.getElementById('currentAddress').textContent = `Accuracy: ${accuracy.toFixed(2)}m`;
+        const currentDistance = calculateDistance(latitude, longitude, OFFICE_LATITUDE, OFFICE_LONGITUDE);
+
+        let statusMessage = 'Location obtained. Ready to CHECK-IN.';
+        let messageType = 'info';
+
+        if (accuracy > ACCEPTABLE_RADIUS_METERS * LOW_ACCURACY_THRESHOLD_FACTOR) {
+          statusMessage = `Warning: Low location accuracy (${accuracy.toFixed(2)}m). Check-in may be marked "Remote (Low Accuracy)".`;
+          messageType = 'error';
+        } else if (currentDistance > ACCEPTABLE_RADIUS_METERS) {
+          statusMessage = `Warning: You are approx. ${currentDistance.toFixed(2)}m from office. Check-in may be marked "Remote (Outside Area)".`;
+          messageType = 'error';
+        }
+
+        showMessage(statusMessage, messageType);
+        document.getElementById('checkinButton').disabled = false;
+      },
+      function(error) {
+        // Geolocation error handler
+        latitude = null;
+        longitude = null;
+        accuracy = null;
+        document.getElementById('currentAddress').textContent = `GPS error: ${error.message || 'Unknown error'}.`;
+        showMessage(`Failed to get GPS location: ${error.message || 'Unknown error'}. You can still Check-In but will be marked "Remote (No Location)".`, 'error');
+        document.getElementById('checkinButton').disabled = false; // Enable button even if no location
+      },
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+    );
+  } else {
+    // Browser does not support geolocation
+    latitude = null;
+    longitude = null;
+    accuracy = null;
+    document.getElementById('currentAddress').textContent = 'The browser does not support location.';
+    showMessage('Your browser does not support geolocation. You can still Check-In but will be marked "Remote (No Location)".', 'error');
+    document.getElementById('checkinButton').disabled = false; // Enable button
+  }
+}
+
+// Handle Check-In button click
+document.getElementById('checkinButton').addEventListener('click', function() {
+  showMessage('Processing CHECK-IN...', 'loading');
+  this.disabled = true; // Disable button immediately
+
+  const currentIpAddress = document.getElementById('ipAddress').textContent;
+
+  // Call GAS server-side function to save attendance
+  google.script.run
+    .withSuccessHandler(function(result) {
+      //console.log('Check-in success:', result);
+      showMessage(result, 'success');
+      document.getElementById('checkinButton').textContent = 'CHECK-IN!'; // Change text to indicate completion
+      document.getElementById('checkinButton').disabled = true; // Keep disabled after successful check-in
+      loadMap(); // Refresh the map
+
+      // Update heatmap for the current month after a delay to ensure data consistency
+      const now = new Date();
+      const yearMonth = now.toISOString().substring(0, 7); // e.g., "2025-07"
+      document.getElementById('calendarMonth').value = yearMonth; // Set month filter
+      document.getElementById('employeeSelect').value = ''; // Reset to "All" employees
+      
+      // Reset window-level heatmap caches to force a data refresh
+      if (window.currentMonth !== undefined) window.currentMonth = ''; 
+      if (window.currentEmployee !== undefined) window.currentEmployee = '';
+      if (window.lastResult !== undefined) window.lastResult = null; 
+
+      if (typeof window.loadCheckinCalendar === 'function') {
+        // Delay heatmap refresh slightly to allow server-side data to update
+        setTimeout(() => {
+          window.loadCheckinCalendar(false, true); // Force refresh heatmap
+        }, 2000); // 2-second delay
+      } else {
+        //console.error('loadCheckinCalendar is not defined');
+      }
+    })
+    .withFailureHandler(function(error) {
+      //console.log('Check-in error:', error);
+      showMessage('CHECK-IN error: ' + error.message, 'error');
+      document.getElementById('checkinButton').disabled = false; // Re-enable on error
+    })
+    .saveAttendance(initialEmployeeId, latitude, longitude, currentIpAddress, initialCheckinCode, accuracy);
+});
+
+// Initialize the Leaflet map instance
+const map = L.map('map', { zoomControl: true }).setView([OFFICE_LATITUDE, OFFICE_LONGITUDE], 13);
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution: '© <a href="https://hcdc-ap.github.io/phamanh/">OSM_AP</a>'
+}).addTo(map);
+
+// Custom marker icons for Leaflet
+const iconSize = [32, 32];
+const iconAnchor = [16, 32];
+const popupAnchor = [0, -32]; // Adjust popup to appear above the marker
+const customIcons = {
+  'Office': L.icon({
+    iconUrl: 'https://i.ibb.co/Tw2CN2k/img-8-8-png-crop1.png', // Your office logo
+    iconSize: iconSize,
+    iconAnchor: iconAnchor,
+    popupAnchor: popupAnchor
+  }),
+  'Valid': L.icon({
+    iconUrl: 'https://i.ibb.co/ZRkHpwkQ/Quby-icecream.gif', // Green/Valid marker
+    iconSize: iconSize,
+    iconAnchor: iconAnchor,
+    popupAnchor: popupAnchor
+  }),
+  'Remote (Outside Area)': L.icon({
+    iconUrl: 'https://i.ibb.co/zhvbBhtz/Quby-hugme.gif', // Red/Out of Area marker
+    iconSize: iconSize,
+    iconAnchor: iconAnchor,
+    popupAnchor: popupAnchor
+  }),
+  'Remote (Low Accuracy)': L.icon({
+    iconUrl: 'https://i.ibb.co/vvmsXRTP/Quby-wonder.gif', // Orange/Low Accuracy marker
+    iconSize: iconSize,
+    iconAnchor: iconAnchor,
+    popupAnchor: popupAnchor
+  })
+};
+
+// Load and display attendance data on the map
+function loadMap() {
+  //console.log('loadMap called with employeeId:', initialEmployeeId);
+  const mapPlaceholder = document.getElementById("staticMapPlaceholder");
+  const mapDiv = document.getElementById("map");
+
+  // Show loading placeholder
+  mapPlaceholder.style.display = "flex";
+  mapPlaceholder.className = "static-map-placeholder loading";
+  mapPlaceholder.innerHTML = `
+    <img src="https://i.ibb.co/8wLBpP9/Quby-beddance-1.gif" alt="Loading..." class="loading-gif">
+    <p>Loading map...</p>
+  `;
+  mapDiv.style.display = "none"; // Hide actual map during loading
+
+  google.script.run
+    .withSuccessHandler(function(data) {
+      //console.log('Map data received:', data);
+      if (data.error) {
+        //console.log('Map data error:', data.error);
+        mapPlaceholder.style.display = "flex";
+        mapPlaceholder.className = "static-map-placeholder error";
+        mapPlaceholder.innerHTML = `
+          <img src="https://i.ibb.co/hxGRL5Nv/Quby-sheet.gif" alt="Error..." class="loading-gif">
+          <p>${data.error}</p>
+        `;
+        showMessage(data.error, "error");
+        return;
+      }
+
+      // Hide loading placeholder and show map
+      mapPlaceholder.style.display = "none";
+      mapDiv.style.display = "block";
+      map.invalidateSize(); // Invalidate size for correct map rendering
+
+      // Clear existing markers and circles from the map
+      map.eachLayer(layer => {
+        if (layer instanceof L.Marker || layer instanceof L.Circle) {
+          map.removeLayer(layer);
+        }
+      });
+
+      const points = data.points;
+      //console.log('Points to render:', points);
+      let bounds = []; // To store coordinates for fitting map view
+
+      points.forEach(point => {
+        const { lat, lng, status, label } = point;
+        let markerColor = '#0000FF'; // Default to blue for office, if applicable
+        let radius = 0; // Default no circle
+
+        if (status === 'Office') {
+          markerColor = '#0000FF';
+          radius = ACCEPTABLE_RADIUS_METERS; // Office radius
+        } else if (status === 'Valid') {
+          markerColor = '#008000'; // Green
+          radius = ACCEPTABLE_RADIUS_METERS;
+        } else if (status === 'Remote (Outside Area)') {
+          markerColor = '#FF0000'; // Red
+          radius = ACCEPTABLE_RADIUS_METERS; // Still show office radius for context
+        } else if (status === 'Remote (Low Accuracy)') {
+          markerColor = '#FFA500'; // Orange
+          radius = ACCEPTABLE_RADIUS_METERS * LOW_ACCURACY_THRESHOLD_FACTOR; // Show increased accuracy radius
+        } else {
+            // For 'Remote (No Location)' or 'Unknown', use a default icon/color without a circle
+            markerColor = '#808080'; // Grey
+            radius = 0;
+        }
+        
+        // Add marker
+        const marker = L.marker([lat, lng], { icon: customIcons[status] || L.Icon.Default }).addTo(map)
+          .bindPopup(`<b>${label}</b><br>Status: ${status}`);
+        
+        // Add circle if radius is defined
+        if (radius > 0) {
+          L.circle([lat, lng], {
+            color: markerColor,
+            fillColor: markerColor,
+            fillOpacity: 0.3,
+            radius: radius
+          }).addTo(map);
+        }
+        bounds.push([lat, lng]); // Add point to bounds for map fitting
+      });
+
+      //console.log('Bounds:', bounds);
+      if (bounds.length > 0) {
+        // Fit map to bounds with a slight delay for rendering
+        setTimeout(() => {
+          map.fitBounds(bounds, { padding: [50, 50] });
+          //console.log('Map fitBounds called');
+        }, 200);
+      } else {
+        // If no points, set default view
+        //console.log('No bounds to fit, setting default view');
+        map.setView([OFFICE_LATITUDE, OFFICE_LONGITUDE], 13);
+      }
+    })
+    .withFailureHandler(function(error) {
+      //console.log('Map load error:', error);
+      mapPlaceholder.style.display = "flex";
+      mapPlaceholder.className = "static-map-placeholder error";
+      mapPlaceholder.innerHTML = `
+        <img src="https://i.ibb.co/r2hD9hV/Quby-computer.gif" alt="Error..." class="loading-gif">
+        <p>Error loading map: ${error.message}</p>
+      `;
+      showMessage(`Error loading map: ${error.message}`, "error");
+    })
+    .getAttendanceDataForMap(initialEmployeeId || ''); // Pass employee ID or empty string
+}
+
+// Run initialization and load both map and heatmap when the window is fully loaded
+window.onload = function() {
+  //console.log('Window loaded, initial employeeId:', initialEmployeeId);
+  initializePage(); // Start the process of getting info and location
+  loadMap(); // Load initial map data
+  // Ensure loadCheckinCalendar exists before calling it, as it's defined in the inline script block
+  if (typeof window.loadCheckinCalendar === 'function') {
+    //console.log('Initial load of heatmap');
+    window.loadCheckinCalendar(true); // Perform initial heatmap load
+  } else {
+    //console.error('loadCheckinCalendar is not defined on initial load');
+  }
+};
