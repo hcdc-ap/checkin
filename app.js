@@ -1,21 +1,24 @@
-// Global variables from GAS template (for local testing, you might hardcode these or mock them)
-// In your actual GAS deployed web app, these lines will be populated by the template engine.
-// For GitHub Pages, these will just be constants with placeholder values or could be removed if not needed for static display.
-// For a fully functional local development, you'd need a server-side component to mimic GAS.
-const initialEmployeeId = '<?= employeeId ?>'; // Example: 'EMP001'
-const initialCheckinCode = '<?= checkinCode ?>'; // Example: 'ABCD123'
-window.OFFICE_LATITUDE = <?!= OFFICE_LATITUDE ?>; // Example: 10.740942012003238
-window.OFFICE_LONGITUDE = <?!= OFFICE_LONGITUDE ?>; // Example: 106.68562129532752
-window.ACCEPTABLE_RADIUS_METERS = <?!= ACCEPTABLE_RADIUS_METERS ?>; // Example: 1701
-window.LOW_ACCURACY_THRESHOLD_FACTOR = <?!= LOW_ACCURACY_THRESHOLD_FACTOR ?>; // Example: 1.7
+// app.js (Unified for both GAS and GitHub Pages)
 
+// --- GLOBAL VARIABLES & CONSTANTS ---
+// These variables are populated by Google Apps Script template when deployed as a web app.
+// For GitHub Pages (static display), they will be set to fallback/mock values.
+// The typeof google === 'undefined' check helps detect the environment.
+let initialEmployeeId = '';
+let initialCheckinCode = '';
+let OFFICE_LATITUDE = 0;
+let OFFICE_LONGITUDE = 0;
+let ACCEPTABLE_RADIUS_METERS = 0;
+let LOW_ACCURACY_THRESHOLD_FACTOR = 0;
 
+// Dynamic variables for location and user info
 let currentLatitude = null;
 let currentLongitude = null;
 let currentAccuracy = null;
 let userIpAddress = 'Loading...';
 let employeeName = 'Loading...';
 
+// DOM Elements
 const messageDiv = document.getElementById('message');
 const checkinButton = document.getElementById('checkinButton');
 const employeeIdDisplay = document.getElementById('employeeIdDisplay');
@@ -25,18 +28,113 @@ const ipAddressDisplay = document.getElementById('ipAddress');
 const currentAddressDisplay = document.getElementById('currentAddress');
 const mapElement = document.getElementById('map');
 const staticMapPlaceholder = document.getElementById('staticMapPlaceholder');
+const calendarMonthSelect = document.getElementById('calendarMonth');
+const employeeSelect = document.getElementById('employeeSelect');
+const heatmapLoading = document.getElementById('heatmap-loading');
+const containerDiv = document.getElementById('container');
 
-let map = null;
+
+// Map related variables
+let map = null; // Single map instance
 let officeMarker = null;
 let employeeMarker = null;
 let accuracyCircle = null;
-let distanceCircle = null;
+let distanceCircle = null; // Note: distanceCircle was not used in previous code, but declared.
 
+// Heatmap related variables
+let allEmployees = [];
+let currentHeatmapEmployee = ''; // Renamed to avoid conflict with `employeeName`
+let currentHeatmapMonth = '';   // Renamed to avoid conflict with `currentMonth` (Date object)
+let lastHeatmapResult = null; // Cache the last fetched result to avoid redundant calls
 
-// Function to calculate distance between two lat/lon points (Haversine formula)
+// --- ENVIRONMENT-SPECIFIC SETUP (GAS vs. GitHub Pages) ---
+if (typeof google === 'undefined' || typeof google.script === 'undefined') {
+    // This block runs ONLY on GitHub Pages (or local development outside GAS)
+    console.warn("Running on a non-GAS environment. Mocking google.script.run and using hardcoded values.");
+
+    // Hardcode placeholder values for GitHub Pages
+    initialEmployeeId = 'DEMO_EMP_007';
+    initialCheckinCode = 'DEMO_CODE_123';
+    OFFICE_LATITUDE = 10.762622; // Example Latitude for HCDC
+    OFFICE_LONGITUDE = 106.660172; // Example Longitude for HCDC
+    ACCEPTABLE_RADIUS_METERS = 1701; // Example: 1.7km radius
+    LOW_ACCURACY_THRESHOLD_FACTOR = 1.7;
+
+    // Mock google.script.run to prevent errors
+    window.google = {
+        script: {
+            run: new Proxy({}, {
+                get: (target, prop) => {
+                    return (...args) => {
+                        console.info(`MOCK: google.script.run.${String(prop)} called with args:`, args);
+                        return {
+                            withSuccessHandler: (cb) => {
+                                let mockData;
+                                switch (String(prop)) {
+                                    case 'getEmployeeNameById':
+                                        mockData = 'Demo User (GitHub Pages)';
+                                        break;
+                                    case 'getUserIpAddress':
+                                        mockData = '127.0.0.1 (Mock IP)';
+                                        break;
+                                    case 'saveAttendance':
+                                        mockData = 'Check-in (Mock) successful! (No real data saved)';
+                                        break;
+                                    case 'getAttendanceDataForMap':
+                                        mockData = {
+                                            points: [
+                                                { lat: OFFICE_LATITUDE, lng: OFFICE_LONGITUDE, status: 'Office', label: 'HCDC Office' },
+                                                { lat: OFFICE_LATITUDE + 0.002, lng: OFFICE_LONGITUDE - 0.002, status: 'Valid', label: 'Mock Check-in Valid' },
+                                                { lat: OFFICE_LATITUDE + 0.005, lng: OFFICE_LONGITUDE + 0.005, status: 'Remote (Outside Area)', label: 'Mock Check-in Remote' }
+                                            ],
+                                            error: null
+                                        };
+                                        break;
+                                    case 'getGeoAddressByMapsService':
+                                        mockData = `Mock Address: ${args[0].toFixed(4)}, ${args[1].toFixed(4)}`;
+                                        break;
+                                    case 'getAttendanceCalendarMonthWithRemote':
+                                        const [year, month] = args;
+                                        const dummyDaily = {};
+                                        const today = new Date();
+                                        if (year === today.getFullYear() && month === (today.getMonth() + 1)) {
+                                            const currentDay = today.getDate();
+                                            const dateStr = `${year}-${month.toString().padStart(2, '0')}-${currentDay.toString().padStart(2, '0')}`;
+                                            dummyDaily[dateStr] = { valid: ['Demo User (GitHub Pages)'], remote: [] };
+                                        }
+                                        mockData = {
+                                            daily: dummyDaily,
+                                            employees: ['Demo User (GitHub Pages)', 'Mock Employee 1', 'Mock Employee 2']
+                                        };
+                                        break;
+                                    default:
+                                        mockData = `MOCK: Function ${String(prop)} called.`;
+                                }
+                                setTimeout(() => cb(mockData), 500); // Simulate network delay
+                                return { withFailureHandler: (cb) => {} };
+                            },
+                            withFailureHandler: (cb) => {}
+                        };
+                    };
+                }
+            })
+        }
+    };
+} else {
+    // This block runs ONLY when deployed as a Google Apps Script Web App
+    // The template values are directly inserted here by the Apps Script engine.
+    initialEmployeeId = '<?= employeeId ?>';
+    initialCheckinCode = '<?= checkinCode ?>';
+    OFFICE_LATITUDE = <?!= OFFICE_LATITUDE ?>;
+    OFFICE_LONGITUDE = <?!= OFFICE_LONGITUDE ?>;
+    ACCEPTABLE_RADIUS_METERS = <?!= ACCEPTABLE_RADIUS_METERS ?>;
+    LOW_ACCURACY_THRESHOLD_FACTOR = <?!= LOW_ACCURACY_THRESHOLD_FACTOR ?>;
+}
+
+// --- UTILITY FUNCTIONS ---
 function calculateDistance(lat1, lon1, lat2, lon2) {
     const R = 6371e3; // metres
-    const φ1 = (lat1 * Math.PI) / 180; // φ, λ in radians
+    const φ1 = (lat1 * Math.PI) / 180;
     const φ2 = (lat2 * Math.PI) / 180;
     const Δφ = ((lat2 - lat1) * Math.PI) / 180;
     const Δλ = ((lon2 - lon1) * Math.PI) / 180;
@@ -45,106 +143,221 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
               Math.cos(φ1) * Math.cos(φ2) *
               Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-
     return R * c; // in metres
 }
 
-function showMessage(msg, type) {
+function showMessage(msg, type = 'info') {
+    //console.log(`showMessage: ${msg} (${type})`);
     messageDiv.textContent = msg;
-    messageDiv.className = `message ${type}`;
-    messageDiv.style.display = 'block';
+    messageDiv.className = 'message';
+    if (type === 'error') {
+        messageDiv.classList.add('error');
+    } else if (type === 'success') {
+        messageDiv.classList.add('success');
+    } else if (type === 'loading') {
+        messageDiv.classList.add('loading');
+    }
+    messageDiv.style.display = msg ? 'block' : 'none';
 }
 
 function hideMessage() {
     messageDiv.style.display = 'none';
 }
 
-// Initialize Map
-function initializeMap(mapData) {
-    staticMapPlaceholder.style.display = 'none';
-    mapElement.style.display = 'block';
-
+// --- MAP FUNCTIONS ---
+// Initialize the Leaflet map instance
+function initLeafletMap() {
     if (!map) {
-        map = L.map('map').setView([window.OFFICE_LATITUDE, window.OFFICE_LONGITUDE], 15);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        map = L.map('map', { zoomControl: true }).setView([OFFICE_LATITUDE, OFFICE_LONGITUDE], 13);
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© <a href="https://hcdc-ap.github.io/phamanh/">OSM_AP</a>'
         }).addTo(map);
     } else {
+        // Clear existing markers/circles if map already initialized
         map.eachLayer(function(layer) {
-            if (layer !== officeMarker && layer !== employeeMarker && layer !== accuracyCircle && layer !== distanceCircle) {
+            if (layer instanceof L.Marker || layer instanceof L.Circle) {
                 map.removeLayer(layer);
             }
         });
     }
 
-    const icons = {
-        'Office': L.divIcon({ className: 'custom-div-icon office-icon', html: '<i class="fa fa-building" style="color:blue;"></i>', iconSize: [30, 30], iconAnchor: [15, 30] }),
-        'Valid': L.divIcon({ className: 'custom-div-icon valid-icon', html: '<i class="fa fa-map-marker-alt" style="color:green;"></i>', iconSize: [30, 30], iconAnchor: [15, 30] }),
-        'Remote (Outside Area)': L.divIcon({ className: 'custom-div-icon remote-icon', html: '<i class="fa fa-map-marker-alt" style="color:red;"></i>', iconSize: [30, 30], iconAnchor: [15, 30] }),
-        'Remote (Low Accuracy)': L.divIcon({ className: 'custom-div-icon low-accuracy-icon', html: '<i class="fa fa-map-marker-alt" style="color:orange;"></i>', iconSize: [30, 30], iconAnchor: [15, 30] }),
-        'Remote (No Location)': L.divIcon({ className: 'custom-div-icon no-location-icon', html: '<i class="fa fa-map-marker-alt" style="color:gray;"></i>', iconSize: [30, 30], iconAnchor: [15, 30] }),
-        'Unknown': L.divIcon({ className: 'custom-div-icon unknown-icon', html: '<i class="fa fa-map-marker-alt" style="color:grey;"></i>', iconSize: [30, 30], iconAnchor: [15, 30] })
-    };
-
-    let bounds = L.latLngBounds([]);
-
-    mapData.points.forEach(point => {
-        const marker = L.marker([point.lat, point.lng], {
-            icon: icons[point.status] || icons['Unknown']
-        }).addTo(map)
-          .bindPopup(point.label);
-        bounds.extend([point.lat, point.lng]);
-    });
-
-    if (bounds.isValid()) {
-        map.fitBounds(bounds, { padding: [50, 50] });
-    } else {
-        map.setView([window.OFFICE_LATITUDE, window.OFFICE_LONGITUDE], 15);
-    }
+    // Add office marker
+    officeMarker = L.marker([OFFICE_LATITUDE, OFFICE_LONGITUDE], { icon: customIcons['Office'] })
+        .addTo(map)
+        .bindPopup('HCDC Office');
 }
 
+// Custom marker icons for Leaflet
+const iconSize = [32, 32];
+const iconAnchor = [16, 32];
+const popupAnchor = [0, -32]; // Adjust popup to appear above the marker
+const customIcons = {
+    'Office': L.icon({
+        iconUrl: 'https://i.ibb.co/Tw2CN2k/img-8-8-png-crop1.png', // Your office logo
+        iconSize: iconSize,
+        iconAnchor: iconAnchor,
+        popupAnchor: popupAnchor
+    }),
+    'Valid': L.icon({
+        iconUrl: 'https://i.ibb.co/ZRkHpwkQ/Quby-icecream.gif', // Green/Valid marker
+        iconSize: iconSize,
+        iconAnchor: iconAnchor,
+        popupAnchor: popupAnchor
+    }),
+    'Remote (Outside Area)': L.icon({
+        iconUrl: 'https://i.ibb.co/zhvbBhtz/Quby-hugme.gif', // Red/Out of Area marker
+        iconSize: iconSize,
+        iconAnchor: iconAnchor,
+        popupAnchor: popupAnchor
+    }),
+    'Remote (Low Accuracy)': L.icon({
+        iconUrl: 'https://i.ibb.co/vvmsXRTP/Quby-wonder.gif', // Orange/Low Accuracy marker
+        iconSize: iconSize,
+        iconAnchor: iconAnchor,
+        popupAnchor: popupAnchor
+    })
+};
 
-function getInitialDataAndLocation() {
+// Load and display attendance data on the map
+function loadMap() {
+    //console.log('loadMap called with initialEmployeeId:', initialEmployeeId);
+    staticMapPlaceholder.style.display = "flex";
+    staticMapPlaceholder.className = "static-map-placeholder loading";
+    staticMapPlaceholder.innerHTML = `
+        <img src="https://i.ibb.co/8wLBpP9/Quby-beddance-1.gif" alt="Loading..." class="loading-gif">
+        <p>Loading map...</p>
+    `;
+    mapElement.style.display = "none"; // Hide actual map during loading
+
+    google.script.run
+        .withSuccessHandler(function(data) {
+            //console.log('Map data received:', data);
+            if (data.error) {
+                //console.log('Map data error:', data.error);
+                staticMapPlaceholder.style.display = "flex";
+                staticMapPlaceholder.className = "static-map-placeholder error";
+                staticMapPlaceholder.innerHTML = `
+                    <img src="https://i.ibb.co/hxGRL5Nv/Quby-sheet.gif" alt="Error..." class="loading-gif">
+                    <p>${data.error}</p>
+                `;
+                showMessage(data.error, "error");
+                return;
+            }
+            // Initialize or clear map before adding new points
+            initLeafletMap();
+            mapElement.style.display = "block"; // Show actual map
+            staticMapPlaceholder.style.display = "none"; // Hide placeholder
+
+            let bounds = L.latLngBounds([]);
+
+            // Add office point to bounds
+            bounds.extend([OFFICE_LATITUDE, OFFICE_LONGITUDE]);
+
+            data.points.forEach(point => {
+                const marker = L.marker([point.lat, point.lng], {
+                    icon: customIcons[point.status] || customIcons['Valid'] // Fallback to Valid icon
+                }).addTo(map)
+                  .bindPopup(point.label);
+                bounds.extend([point.lat, point.lng]);
+            });
+
+            if (bounds.isValid()) {
+                map.fitBounds(bounds, { padding: [50, 50] });
+            } else {
+                map.setView([OFFICE_LATITUDE, OFFICE_LONGITUDE], 15);
+            }
+        })
+        .withFailureHandler(function(error) {
+            console.error("Error fetching map data:", error);
+            staticMapPlaceholder.style.display = "flex";
+            staticMapPlaceholder.className = "static-map-placeholder error";
+            staticMapPlaceholder.innerHTML = `
+                <img src="https://i.ibb.co/hxGRL5Nv/Quby-sheet.gif" alt="Error..." class="loading-gif">
+                <p>Failed to fetch map data: ${error.message}</p>
+            `;
+            showMessage(`Failed to fetch map data: ${error.message}`, "error");
+        })
+        .getAttendanceDataForMap(initialEmployeeId);
+}
+
+// --- GEOLOCATION AND INITIAL DATA LOAD ---
+function initializePage() {
+    //console.log('Initial employeeId:', initialEmployeeId);
+    if (!initialEmployeeId || !initialCheckinCode) {
+        showMessage('Employee ID or attendance code is missing. Please use the link from email.', 'error');
+        employeeIdDisplay.textContent = 'N/A';
+        checkinCodeDisplay.textContent = 'N/A';
+        employeeNameDisplay.textContent = 'N/A';
+        ipAddressDisplay.textContent = 'N/A';
+        currentAddressDisplay.textContent = 'N/A';
+        checkinButton.disabled = true;
+        return;
+    }
+    showMessage('Loading information...', 'loading');
+    checkinButton.disabled = true;
     employeeIdDisplay.textContent = initialEmployeeId;
     checkinCodeDisplay.textContent = initialCheckinCode;
 
-    // Call server-side functions
     google.script.run
         .withSuccessHandler(function(name) {
-            employeeName = name || 'N/A';
+            employeeName = name || 'Name not found';
             employeeNameDisplay.textContent = employeeName;
+            getIpAddress();
         })
         .withFailureHandler(function(error) {
-            console.error("Failed to get employee name:", error);
-            employeeNameDisplay.textContent = 'Error';
+            console.error('Error loading employee name:', error);
+            showMessage('Error loading employee name: ' + error.message, 'error');
+            employeeNameDisplay.textContent = 'Error!';
+            getIpAddress();
         })
         .getEmployeeNameById(initialEmployeeId);
+}
 
+function getIpAddress() {
     google.script.run
         .withSuccessHandler(function(ip) {
-            userIpAddress = ip;
+            userIpAddress = ip || 'N/A';
             ipAddressDisplay.textContent = userIpAddress;
+            getGeolocation();
         })
         .withFailureHandler(function(error) {
-            console.error("Failed to get IP address:", error);
-            ipAddressDisplay.textContent = 'Error';
+            console.error('Error loading IP address:', error);
+            showMessage('Error loading IP address: ' + error.message, 'error');
+            ipAddressDisplay.textContent = 'N/A';
+            getGeolocation();
         })
         .getUserIpAddress();
+}
 
-    // Get geolocation
+function getGeolocation() {
     if (navigator.geolocation) {
+        showMessage('Getting your current location...', 'loading');
+        checkinButton.disabled = true;
         navigator.geolocation.getCurrentPosition(
             function(position) {
                 currentLatitude = position.coords.latitude;
                 currentLongitude = position.coords.longitude;
                 currentAccuracy = position.coords.accuracy;
 
-                // Update UI with location
-                currentAddressDisplay.textContent = `Lat: ${currentLatitude.toFixed(6)}, Lng: ${currentLongitude.toFixed(6)} (Acc: ${currentAccuracy.toFixed(2)}m)`;
-                checkinButton.disabled = false; // Enable check-in button
+                currentAddressDisplay.textContent = `Accuracy: ${currentAccuracy.toFixed(2)}m`;
+                const currentDistance = calculateDistance(currentLatitude, currentLongitude, OFFICE_LATITUDE, OFFICE_LONGITUDE);
 
-                // Optionally, get address from Maps service (client-side if API key available, otherwise server-side)
-                // For simplicity, this example still relies on server-side getGeoAddressByMapsService
+                let statusMessage = 'Location obtained. Ready to CHECK-IN.';
+                let messageType = 'info';
+
+                if (currentAccuracy > ACCEPTABLE_RADIUS_METERS * LOW_ACCURACY_THRESHOLD_FACTOR) {
+                    statusMessage = `Warning: Low location accuracy (${currentAccuracy.toFixed(2)}m). Check-in may be marked "Remote (Low Accuracy)".`;
+                    messageType = 'error';
+                } else if (currentDistance > ACCEPTABLE_RADIUS_METERS) {
+                    statusMessage = `Warning: You are approx. ${currentDistance.toFixed(2)}m from office. Check-in may be marked "Remote (Outside Area)".`;
+                    messageType = 'error';
+                }
+
+                showMessage(statusMessage, messageType);
+                checkinButton.disabled = false;
+
+                // Get address from Maps service (server-side via Apps Script)
                 google.script.run
                     .withSuccessHandler(function(address) {
                         currentAddressDisplay.textContent = address;
@@ -155,170 +368,148 @@ function getInitialDataAndLocation() {
                         currentAddressDisplay.textContent = `Lat: ${currentLatitude.toFixed(6)}, Lng: ${currentLongitude.toFixed(6)} (Acc: ${currentAccuracy.toFixed(2)}m) - Address lookup failed`;
                     })
                     .getGeoAddressByMapsService(currentLatitude, currentLongitude);
-
             },
             function(error) {
-                console.error("Geolocation error:", error);
-                currentAddressDisplay.textContent = 'Geolocation denied or unavailable.';
-                checkinButton.disabled = false; // Still allow check-in, but with no location data
+                currentLatitude = null;
+                currentLongitude = null;
+                currentAccuracy = null;
+                currentAddressDisplay.textContent = `GPS error: ${error.message || 'Unknown error'}.`;
+                showMessage(`Failed to get GPS location: ${error.message || 'Unknown error'}. You can still Check-In but will be marked "Remote (No Location)".`, 'error');
+                checkinButton.disabled = false;
             },
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
         );
     } else {
-        currentAddressDisplay.textContent = 'Geolocation is not supported by your browser.';
-        checkinButton.disabled = false; // Allow check-in without location
+        currentLatitude = null;
+        currentLongitude = null;
+        currentAccuracy = null;
+        currentAddressDisplay.textContent = 'The browser does not support location.';
+        showMessage('Your browser does not support geolocation. You can still Check-In but will be marked "Remote (No Location)".', 'error');
+        checkinButton.disabled = false;
     }
-
-    // Load initial map data
-    google.script.run
-        .withSuccessHandler(function(data) {
-            if (data.error) {
-                console.error("Error loading map data:", data.error);
-                staticMapPlaceholder.innerHTML = `<p style="color:red;">Error loading map: ${data.error}</p>`;
-                return;
-            }
-            initializeMap(data);
-        })
-        .withFailureHandler(function(error) {
-            console.error("Error fetching map data:", error);
-            staticMapPlaceholder.innerHTML = `<p style="color:red;">Failed to fetch map data: ${error.message}</p>`;
-        })
-        .getAttendanceDataForMap(initialEmployeeId);
 }
 
-// Handle Check-in button click
+// --- CHECK-IN LOGIC ---
 checkinButton.addEventListener('click', function() {
-    checkinButton.disabled = true;
-    showMessage('Checking in...', 'info');
+    showMessage('Processing CHECK-IN...', 'loading');
+    this.disabled = true;
+
+    const currentIpAddressVal = ipAddressDisplay.textContent; // Use the value from the display
 
     google.script.run
-        .withSuccessHandler(function(response) {
-            showMessage(response, 'success');
-            // Refresh map data after successful check-in
-            google.script.run
-                .withSuccessHandler(function(data) {
-                    if (data.error) {
-                        console.error("Error refreshing map data:", data.error);
-                        return;
-                    }
-                    initializeMap(data);
-                })
-                .withFailureHandler(function(error) {
-                    console.error("Error refreshing map data after check-in:", error);
-                })
-                .getAttendanceDataForMap(initialEmployeeId);
-            loadCheckinCalendar(false, true); // Force refresh heatmap
-            checkinButton.disabled = false;
+        .withSuccessHandler(function(result) {
+            //console.log('Check-in success:', result);
+            showMessage(result, 'success');
+            checkinButton.textContent = 'CHECK-IN!';
+            checkinButton.disabled = true; // Keep disabled after successful check-in
+            
+            // Refresh map and heatmap after successful check-in
+            loadMap(); 
+            
+            // Set calendar and employee select to current month and 'All'
+            const now = new Date();
+            const yearMonth = now.toISOString().substring(0, 7);
+            calendarMonthSelect.value = yearMonth;
+            employeeSelect.value = '';
+
+            // Clear heatmap cache to force refresh
+            lastHeatmapResult = null;
+            currentHeatmapMonth = '';
+            currentHeatmapEmployee = '';
+
+            // Delay heatmap refresh slightly to allow server-side data to update
+            setTimeout(() => {
+                loadCheckinCalendar(false, true); // Force refresh heatmap
+            }, 2000); // 2-second delay
         })
         .withFailureHandler(function(error) {
-            showMessage(`Error: ${error.message}`, 'error');
-            console.error("Check-in error:", error);
+            console.error('Check-in error:', error);
+            showMessage('CHECK-IN error: ' + error.message, 'error');
             checkinButton.disabled = false;
         })
-        .saveAttendance(initialEmployeeId, currentLatitude, currentLongitude, userIpAddress, initialCheckinCode, currentAccuracy);
+        .saveAttendance(initialEmployeeId, currentLatitude, currentLongitude, currentIpAddressVal, initialCheckinCode, currentAccuracy);
 });
 
-// Run when the DOM is fully loaded
-document.addEventListener('DOMContentLoaded', getInitialDataAndLocation);
-
-
-// Heatmap JS logic (moved from inline script in index.html)
-let allEmployees = [];
-let currentEmployee = '';
-let currentMonth = '';
-let lastResult = null; // Cache the last fetched result to avoid redundant calls
-
-function showLoader(show) {
-  document.getElementById('heatmap-loading').style.display = show ? '' : 'none';
-  document.getElementById('container').style.opacity = show ? 0.3 : 1;
+// --- HEATMAP LOGIC ---
+function showHeatmapLoader(show) {
+    heatmapLoading.style.display = show ? '' : 'none';
+    containerDiv.style.opacity = show ? 0.3 : 1;
 }
 
 function getSelectedFilters() {
-  return {
-    month: document.getElementById('calendarMonth').value || new Date().toISOString().substring(0, 7),
-    employee: document.getElementById('employeeSelect').value
-  };
+    return {
+        month: calendarMonthSelect.value || new Date().toISOString().substring(0, 7),
+        employee: employeeSelect.value
+    };
 }
 
-document.addEventListener('DOMContentLoaded', function() {
-  const now = new Date();
-  document.getElementById('calendarMonth').value = now.toISOString().substring(0, 7);
-  document.getElementById('calendarMonth').addEventListener('change', function() {
-    loadCheckinCalendar();
-  });
-  document.getElementById('employeeSelect').addEventListener('change', function() {
-    loadCheckinCalendar();
-  });
-  loadCheckinCalendar(true); // Initial load of calendar
-});
-
 function buildHeatmapData(daily, year, month) {
-  const daysInMonth = new Date(year, month, 0).getDate(); // Get days in month (0 makes it last day of previous month)
-  const firstDay = new Date(year, month - 1, 1); // Month is 0-indexed for Date object
-  const firstWeekday = firstDay.getDay(); // 0 for Sunday, 1 for Monday, etc.
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const firstDay = new Date(year, month - 1, 1);
+    const firstWeekday = firstDay.getDay();
 
-  const data = [];
+    const data = [];
 
-  // Add empty placeholders for days before the 1st of the month
-  for (let emptyDay = 0; emptyDay < firstWeekday; emptyDay++) {
-    data.push({
-      x: emptyDay,
-      y: 5, // Y-coordinate for the last row (top-most in Highcharts heatmap)
-      value: null,
-      date: null,
-      custom: { empty: true } // Custom property to mark as empty
-    });
-  }
-
-  // Populate data for each day of the month
-  for (let day = 1; day <= daysInMonth; day++) {
-    const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
-    const dayData = daily[dateStr] || { valid: [], remote: [] };
-
-    let value = null; // Default to null (no check-in)
-    if (dayData.valid.length > 0) {
-      value = dayData.valid.length; // Positive value for valid check-ins
-    } else if (dayData.remote.length > 0) {
-      value = -dayData.remote.length; // Negative value for remote/error check-ins
+    // Add empty placeholders for days before the 1st of the month
+    for (let emptyDay = 0; emptyDay < firstWeekday; emptyDay++) {
+        data.push({
+            x: emptyDay,
+            y: 5,
+            value: null,
+            date: null,
+            custom: { empty: true }
+        });
     }
 
-    data.push({
-      x: (firstWeekday + day - 1) % 7, // Day of the week (0-6)
-      y: 5 - Math.floor((firstWeekday + day - 1) / 7), // Row for the week (0-5, top to bottom)
-      value: value,
-      date: new Date(dateStr).getTime(), // Timestamp for tooltip
-      custom: { monthDay: day, valid: dayData.valid, remote: dayData.remote }
-    });
-  }
-  return data;
+    // Populate data for each day of the month
+    for (let day = 1; day <= daysInMonth; day++) {
+        const dateStr = `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+        const dayData = daily[dateStr] || { valid: [], remote: [] };
+
+        let value = null;
+        if (dayData.valid.length > 0) {
+            value = dayData.valid.length;
+        } else if (dayData.remote.length > 0) {
+            value = -dayData.remote.length;
+        }
+
+        data.push({
+            x: (firstWeekday + day - 1) % 7,
+            y: 5 - Math.floor((firstWeekday + day - 1) / 7),
+            value: value,
+            date: new Date(dateStr).getTime(),
+            custom: { monthDay: day, valid: dayData.valid, remote: dayData.remote }
+        });
+    }
+    return data;
 }
 
 function loadCheckinCalendar(isInitial = false, forceRefresh = false) {
     const { month: val, employee } = getSelectedFilters();
 
     // Cache check: only load if filters changed or forceRefresh is true
-    if (!isInitial && !forceRefresh && currentMonth === val && currentEmployee === employee && lastResult) {
+    if (!isInitial && !forceRefresh && currentHeatmapMonth === val && currentHeatmapEmployee === employee && lastHeatmapResult) {
         //console.log('Returning cached heatmap data');
-        renderHeatmap(lastResult, employee, val); // Render with cached data
+        renderHeatmap(lastHeatmapResult, employee, val); // Render with cached data
         return;
     }
 
-    currentMonth = val;
-    currentEmployee = employee;
-    lastResult = null; // Clear cache explicitly as new data will be fetched
+    currentHeatmapMonth = val;
+    currentHeatmapEmployee = employee;
+    lastHeatmapResult = null; // Clear cache explicitly as new data will be fetched
 
     const [year, month] = val.split('-').map(Number);
-    showLoader(true);
+    showHeatmapLoader(true);
 
     google.script.run
         .withSuccessHandler(function(result) {
             //console.log('Heatmap data received:', result);
-            lastResult = result; // Cache the result
-            showLoader(false);
+            lastHeatmapResult = result; // Cache the result
+            showHeatmapLoader(false);
             renderHeatmap(result, employee, val);
         })
         .withFailureHandler(function(error) {
-            showLoader(false);
+            showHeatmapLoader(false);
             console.error('Heatmap error:', error);
             alert(`Failed to load heatmap: ${error.message}`);
         })
@@ -357,21 +548,21 @@ function renderHeatmap(result, employeeFilter, monthVal) {
         title: { text: `Monthly attendance ${month}/${year}` },
         xAxis: {
             categories: weekdays,
-            opposite: true, // Place categories at the top
-            lineWidth: 26, // Background line for headers
+            opposite: true,
+            lineWidth: 26,
             offset: 13,
             lineColor: '#f8eef2',
             labels: { rotation: 0, y: 20, style: { textTransform: 'uppercase', fontWeight: 'bold' } }
         },
         yAxis: {
             min: 0,
-            max: 5, // 6 rows for weeks (0-5)
-            visible: false // Hide y-axis labels
+            max: 5,
+            visible: false
         },
         colorAxis: {
             dataClasses: [
-                { from: 1, color: '#3d72b4', to: 999, name: 'Valid' }, // Blue for valid check-ins
-                { from: -999, to: -1, color: '#e69138', name: 'Remote/Error' } // Orange for remote/error check-ins
+                { from: 1, color: '#3d72b4', to: 999, name: 'Valid' },
+                { from: -999, to: -1, color: '#e69138', name: 'Remote/Error' }
             ]
         },
         legend: {
@@ -393,7 +584,6 @@ function renderHeatmap(result, employeeFilter, monthVal) {
 
                 if (validCount > 0) {
                     text += `<br><span style="color:#3d72b4;">Valid: <b>${validCount}</b></span><ul style="margin:4px 0 4px 18px;padding:0;list-style-type:none;">`;
-                    // Only show names if "All" employees selected or if count is small
                     if (employeeFilter === "" || validCount <= 5) {
                         text += this.point.custom.valid.map(n => `<li style="color:#3d72b4;font-weight:bold;margin-bottom:2px;"><i class="fa fa-user-check" style="color:#3d72b4;margin-right:4px;"></i>${n}</li>`).join('');
                     } else if (validCount > 5) {
@@ -420,16 +610,15 @@ function renderHeatmap(result, employeeFilter, monthVal) {
             name: 'Roll call',
             keys: ['x', 'y', 'value', 'date'],
             data: heatmapData,
-            nullColor: '#f9f2fa', // Color for days with no data/no check-ins
+            nullColor: '#f9f2fa',
             borderWidth: 2,
             borderColor: '#f3e6f6',
             dataLabels: [
                 {
                     enabled: true,
-                    // Formatter for showing count in the middle of the cell
                     formatter: function() {
-                        if (this.point.custom && this.point.custom.empty) return null; // Hide for empty cells
-                        const totalCheckins = Math.abs(this.point.value); // Show absolute count for both valid and remote
+                        if (this.point.custom && this.point.custom.empty) return null;
+                        const totalCheckins = Math.abs(this.point.value);
                         return totalCheckins > 0 ? totalCheckins : null;
                     },
                     style: { textOutline: 'none', fontWeight: 'normal', fontSize: '1rem' },
@@ -439,7 +628,7 @@ function renderHeatmap(result, employeeFilter, monthVal) {
                     enabled: true,
                     align: 'left',
                     verticalAlign: 'top',
-                    format: '{#unless point.custom.empty}{point.custom.monthDay}{/unless}', // Show day number
+                    format: '{#unless point.custom.empty}{point.custom.monthDay}{/unless}',
                     backgroundColor: 'whitesmoke',
                     padding: 2,
                     style: { textOutline: 'none', color: '#011f4b', fontSize: '0.9rem', fontWeight: 'bold', opacity: 0.9 },
@@ -448,375 +637,45 @@ function renderHeatmap(result, employeeFilter, monthVal) {
                 }
             ]
         }],
-        credits: { enabled: false } // Disable Highcharts credits
+        credits: { enabled: false }
     });
     //console.log('Heatmap rendered for month:', monthVal);
 }
 
 function buildEmployeeDropdown(employeeList, selected) {
-    const select = document.getElementById('employeeSelect');
-    select.innerHTML = '<option value="">All</option>'; // Always include "All" option
+    const select = employeeSelect; // Use the directly referenced element
+    select.innerHTML = '<option value="">All</option>';
     employeeList.forEach(name => {
         const option = document.createElement('option');
         option.value = name;
         option.text = name;
         select.appendChild(option);
     });
-    // Set the selected value after building the options
     if (selected && employeeList.includes(selected)) {
         select.value = selected;
     } else {
-        select.value = ''; // Ensure "All" is selected if no specific employee
+        select.value = '';
     }
 }
-/*
-* Client-side JavaScript for check-in, map display, and Highcharts heatmap
-* Updated to refresh both map and Highcharts heatmap after check-in
-*/
 
-// Global variables
-let latitude, longitude, accuracy;
+// --- INITIALIZATION ---
+document.addEventListener('DOMContentLoaded', function() {
+    // Set initial month for heatmap filter
+    const now = new Date();
+    calendarMonthSelect.value = now.toISOString().substring(0, 7);
 
-// Constants from index.html (these are populated by GAS templating)
-// For a static GitHub Pages site, you'd hardcode or mock these for display purposes.
-let OFFICE_LATITUDE = window.OFFICE_LATITUDE;
-let OFFICE_LONGITUDE = window.OFFICE_LONGITUDE;
-let ACCEPTABLE_RADIUS_METERS = window.ACCEPTABLE_RADIUS_METERS;
-let LOW_ACCURACY_THRESHOLD_FACTOR = window.LOW_ACCURACY_THRESHOLD_FACTOR;
+    // Add event listeners for heatmap filters
+    calendarMonthSelect.addEventListener('change', function() {
+        loadCheckinCalendar();
+    });
+    employeeSelect.addEventListener('change', function() {
+        loadCheckinCalendar();
+    });
 
-// Function to display status messages
-function showMessage(text, type = 'info') {
-  //console.log(`showMessage: ${text} (${type})`);
-  const messageDiv = document.getElementById('message');
-  messageDiv.textContent = text;
-  messageDiv.className = 'message'; // Reset classes
-  if (type === 'error') {
-    messageDiv.classList.add('error');
-  } else if (type === 'success') {
-    messageDiv.classList.add('success');
-  } else if (type === 'loading') {
-    messageDiv.classList.add('loading');
-  }
-  messageDiv.style.display = text ? 'block' : 'none';
-}
+    // Load initial data for check-in section and map
+    initializePage();
+    loadMap(); // Initial load of map data
 
-// Initialize the page with employee ID and code
-function initializePage() {
-  //console.log('Initial employeeId:', initialEmployeeId);
-  // initialEmployeeId and initialCheckinCode are populated by GAS template
-  if (!initialEmployeeId || !initialCheckinCode) {
-    showMessage('Employee ID or attendance code is missing. Please use the link from email.', 'error');
-    document.getElementById('employeeIdDisplay').textContent = 'N/A';
-    document.getElementById('checkinCodeDisplay').textContent = 'N/A';
-    document.getElementById('employeeName').textContent = 'N/A';
-    document.getElementById('ipAddress').textContent = 'N/A';
-    document.getElementById('currentAddress').textContent = 'N/A';
-    document.getElementById('checkinButton').disabled = true;
-    return;
-  }
-  showMessage('Loading information...', 'loading');
-  document.getElementById('checkinButton').disabled = true;
-  document.getElementById('employeeIdDisplay').textContent = initialEmployeeId;
-  document.getElementById('checkinCodeDisplay').textContent = initialCheckinCode;
-
-  // Call GAS server-side function to get employee name
-  google.script.run
-    .withSuccessHandler(function(name) {
-      document.getElementById('employeeName').textContent = name || 'Name not found';
-      getIpAddress(); // Proceed to get IP after name is loaded
-    })
-    .withFailureHandler(function(error) {
-      //console.log('Error loading employee name:', error);
-      showMessage('Error loading employee name: ' + error.message, 'error');
-      document.getElementById('employeeName').textContent = 'Error!';
-      getIpAddress(); // Still try to get IP even if name fails
-    })
-    .getEmployeeNameById(initialEmployeeId);
-}
-
-// Get IP address
-function getIpAddress() {
-  google.script.run
-    .withSuccessHandler(function(ip) {
-      document.getElementById('ipAddress').textContent = ip || 'N/A';
-      getGeolocation(); // Proceed to get geolocation after IP is loaded
-    })
-    .withFailureHandler(function(error) {
-      //console.log('Error loading IP address:', error);
-      showMessage('Error loading IP address: ' + error.message, 'error');
-      document.getElementById('ipAddress').textContent = 'N/A';
-      getGeolocation(); // Still try to get geolocation even if IP fails
-    })
-    .getUserIpAddress();
-}
-
-// Calculate distance between two points (Haversine formula)
-function calculateDistance(lat1, lon1, lat2, lon2) {
-  const R = 6371e3; // metres
-  const φ1 = lat1 * Math.PI / 180;
-  const φ2 = lat2 * Math.PI / 180;
-  const Δφ = (lat2 - lat1) * Math.PI / 180;
-  const Δλ = (lon2 - lon1) * Math.PI / 180;
-
-  const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-    Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c; // in metres
-}
-
-// Get GPS location
-function getGeolocation() {
-  if (navigator.geolocation) {
-    showMessage('Getting your current location...', 'loading');
-    document.getElementById('checkinButton').disabled = true;
-    navigator.geolocation.getCurrentPosition(
-      function(position) {
-        latitude = position.coords.latitude;
-        longitude = position.coords.longitude;
-        accuracy = position.coords.accuracy;
-
-        document.getElementById('currentAddress').textContent = `Accuracy: ${accuracy.toFixed(2)}m`;
-        const currentDistance = calculateDistance(latitude, longitude, OFFICE_LATITUDE, OFFICE_LONGITUDE);
-
-        let statusMessage = 'Location obtained. Ready to CHECK-IN.';
-        let messageType = 'info';
-
-        if (accuracy > ACCEPTABLE_RADIUS_METERS * LOW_ACCURACY_THRESHOLD_FACTOR) {
-          statusMessage = `Warning: Low location accuracy (${accuracy.toFixed(2)}m). Check-in may be marked "Remote (Low Accuracy)".`;
-          messageType = 'error';
-        } else if (currentDistance > ACCEPTABLE_RADIUS_METERS) {
-          statusMessage = `Warning: You are approx. ${currentDistance.toFixed(2)}m from office. Check-in may be marked "Remote (Outside Area)".`;
-          messageType = 'error';
-        }
-
-        showMessage(statusMessage, messageType);
-        document.getElementById('checkinButton').disabled = false;
-      },
-      function(error) {
-        // Geolocation error handler
-        latitude = null;
-        longitude = null;
-        accuracy = null;
-        document.getElementById('currentAddress').textContent = `GPS error: ${error.message || 'Unknown error'}.`;
-        showMessage(`Failed to get GPS location: ${error.message || 'Unknown error'}. You can still Check-In but will be marked "Remote (No Location)".`, 'error');
-        document.getElementById('checkinButton').disabled = false; // Enable button even if no location
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
-    );
-  } else {
-    // Browser does not support geolocation
-    latitude = null;
-    longitude = null;
-    accuracy = null;
-    document.getElementById('currentAddress').textContent = 'The browser does not support location.';
-    showMessage('Your browser does not support geolocation. You can still Check-In but will be marked "Remote (No Location)".', 'error');
-    document.getElementById('checkinButton').disabled = false; // Enable button
-  }
-}
-
-// Handle Check-In button click
-document.getElementById('checkinButton').addEventListener('click', function() {
-  showMessage('Processing CHECK-IN...', 'loading');
-  this.disabled = true; // Disable button immediately
-
-  const currentIpAddress = document.getElementById('ipAddress').textContent;
-
-  // Call GAS server-side function to save attendance
-  google.script.run
-    .withSuccessHandler(function(result) {
-      //console.log('Check-in success:', result);
-      showMessage(result, 'success');
-      document.getElementById('checkinButton').textContent = 'CHECK-IN!'; // Change text to indicate completion
-      document.getElementById('checkinButton').disabled = true; // Keep disabled after successful check-in
-      loadMap(); // Refresh the map
-
-      // Update heatmap for the current month after a delay to ensure data consistency
-      const now = new Date();
-      const yearMonth = now.toISOString().substring(0, 7); // e.g., "2025-07"
-      document.getElementById('calendarMonth').value = yearMonth; // Set month filter
-      document.getElementById('employeeSelect').value = ''; // Reset to "All" employees
-      
-      // Reset window-level heatmap caches to force a data refresh
-      if (window.currentMonth !== undefined) window.currentMonth = ''; 
-      if (window.currentEmployee !== undefined) window.currentEmployee = '';
-      if (window.lastResult !== undefined) window.lastResult = null; 
-
-      if (typeof window.loadCheckinCalendar === 'function') {
-        // Delay heatmap refresh slightly to allow server-side data to update
-        setTimeout(() => {
-          window.loadCheckinCalendar(false, true); // Force refresh heatmap
-        }, 2000); // 2-second delay
-      } else {
-        //console.error('loadCheckinCalendar is not defined');
-      }
-    })
-    .withFailureHandler(function(error) {
-      //console.log('Check-in error:', error);
-      showMessage('CHECK-IN error: ' + error.message, 'error');
-      document.getElementById('checkinButton').disabled = false; // Re-enable on error
-    })
-    .saveAttendance(initialEmployeeId, latitude, longitude, currentIpAddress, initialCheckinCode, accuracy);
+    // Initial load of calendar heatmap
+    loadCheckinCalendar(true); 
 });
-
-// Initialize the Leaflet map instance
-const map = L.map('map', { zoomControl: true }).setView([OFFICE_LATITUDE, OFFICE_LONGITUDE], 13);
-L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-  attribution: '© <a href="https://hcdc-ap.github.io/phamanh/">OSM_AP</a>'
-}).addTo(map);
-
-// Custom marker icons for Leaflet
-const iconSize = [32, 32];
-const iconAnchor = [16, 32];
-const popupAnchor = [0, -32]; // Adjust popup to appear above the marker
-const customIcons = {
-  'Office': L.icon({
-    iconUrl: 'https://i.ibb.co/Tw2CN2k/img-8-8-png-crop1.png', // Your office logo
-    iconSize: iconSize,
-    iconAnchor: iconAnchor,
-    popupAnchor: popupAnchor
-  }),
-  'Valid': L.icon({
-    iconUrl: 'https://i.ibb.co/ZRkHpwkQ/Quby-icecream.gif', // Green/Valid marker
-    iconSize: iconSize,
-    iconAnchor: iconAnchor,
-    popupAnchor: popupAnchor
-  }),
-  'Remote (Outside Area)': L.icon({
-    iconUrl: 'https://i.ibb.co/zhvbBhtz/Quby-hugme.gif', // Red/Out of Area marker
-    iconSize: iconSize,
-    iconAnchor: iconAnchor,
-    popupAnchor: popupAnchor
-  }),
-  'Remote (Low Accuracy)': L.icon({
-    iconUrl: 'https://i.ibb.co/vvmsXRTP/Quby-wonder.gif', // Orange/Low Accuracy marker
-    iconSize: iconSize,
-    iconAnchor: iconAnchor,
-    popupAnchor: popupAnchor
-  })
-};
-
-// Load and display attendance data on the map
-function loadMap() {
-  //console.log('loadMap called with employeeId:', initialEmployeeId);
-  const mapPlaceholder = document.getElementById("staticMapPlaceholder");
-  const mapDiv = document.getElementById("map");
-
-  // Show loading placeholder
-  mapPlaceholder.style.display = "flex";
-  mapPlaceholder.className = "static-map-placeholder loading";
-  mapPlaceholder.innerHTML = `
-    <img src="https://i.ibb.co/8wLBpP9/Quby-beddance-1.gif" alt="Loading..." class="loading-gif">
-    <p>Loading map...</p>
-  `;
-  mapDiv.style.display = "none"; // Hide actual map during loading
-
-  google.script.run
-    .withSuccessHandler(function(data) {
-      //console.log('Map data received:', data);
-      if (data.error) {
-        //console.log('Map data error:', data.error);
-        mapPlaceholder.style.display = "flex";
-        mapPlaceholder.className = "static-map-placeholder error";
-        mapPlaceholder.innerHTML = `
-          <img src="https://i.ibb.co/hxGRL5Nv/Quby-sheet.gif" alt="Error..." class="loading-gif">
-          <p>${data.error}</p>
-        `;
-        showMessage(data.error, "error");
-        return;
-      }
-
-      // Hide loading placeholder and show map
-      mapPlaceholder.style.display = "none";
-      mapDiv.style.display = "block";
-      map.invalidateSize(); // Invalidate size for correct map rendering
-
-      // Clear existing markers and circles from the map
-      map.eachLayer(layer => {
-        if (layer instanceof L.Marker || layer instanceof L.Circle) {
-          map.removeLayer(layer);
-        }
-      });
-
-      const points = data.points;
-      //console.log('Points to render:', points);
-      let bounds = []; // To store coordinates for fitting map view
-
-      points.forEach(point => {
-        const { lat, lng, status, label } = point;
-        let markerColor = '#0000FF'; // Default to blue for office, if applicable
-        let radius = 0; // Default no circle
-
-        if (status === 'Office') {
-          markerColor = '#0000FF';
-          radius = ACCEPTABLE_RADIUS_METERS; // Office radius
-        } else if (status === 'Valid') {
-          markerColor = '#008000'; // Green
-          radius = ACCEPTABLE_RADIUS_METERS;
-        } else if (status === 'Remote (Outside Area)') {
-          markerColor = '#FF0000'; // Red
-          radius = ACCEPTABLE_RADIUS_METERS; // Still show office radius for context
-        } else if (status === 'Remote (Low Accuracy)') {
-          markerColor = '#FFA500'; // Orange
-          radius = ACCEPTABLE_RADIUS_METERS * LOW_ACCURACY_THRESHOLD_FACTOR; // Show increased accuracy radius
-        } else {
-            // For 'Remote (No Location)' or 'Unknown', use a default icon/color without a circle
-            markerColor = '#808080'; // Grey
-            radius = 0;
-        }
-        
-        // Add marker
-        const marker = L.marker([lat, lng], { icon: customIcons[status] || L.Icon.Default }).addTo(map)
-          .bindPopup(`<b>${label}</b><br>Status: ${status}`);
-        
-        // Add circle if radius is defined
-        if (radius > 0) {
-          L.circle([lat, lng], {
-            color: markerColor,
-            fillColor: markerColor,
-            fillOpacity: 0.3,
-            radius: radius
-          }).addTo(map);
-        }
-        bounds.push([lat, lng]); // Add point to bounds for map fitting
-      });
-
-      //console.log('Bounds:', bounds);
-      if (bounds.length > 0) {
-        // Fit map to bounds with a slight delay for rendering
-        setTimeout(() => {
-          map.fitBounds(bounds, { padding: [50, 50] });
-          //console.log('Map fitBounds called');
-        }, 200);
-      } else {
-        // If no points, set default view
-        //console.log('No bounds to fit, setting default view');
-        map.setView([OFFICE_LATITUDE, OFFICE_LONGITUDE], 13);
-      }
-    })
-    .withFailureHandler(function(error) {
-      //console.log('Map load error:', error);
-      mapPlaceholder.style.display = "flex";
-      mapPlaceholder.className = "static-map-placeholder error";
-      mapPlaceholder.innerHTML = `
-        <img src="https://i.ibb.co/r2hD9hV/Quby-computer.gif" alt="Error..." class="loading-gif">
-        <p>Error loading map: ${error.message}</p>
-      `;
-      showMessage(`Error loading map: ${error.message}`, "error");
-    })
-    .getAttendanceDataForMap(initialEmployeeId || ''); // Pass employee ID or empty string
-}
-
-// Run initialization and load both map and heatmap when the window is fully loaded
-window.onload = function() {
-  //console.log('Window loaded, initial employeeId:', initialEmployeeId);
-  initializePage(); // Start the process of getting info and location
-  loadMap(); // Load initial map data
-  // Ensure loadCheckinCalendar exists before calling it, as it's defined in the inline script block
-  if (typeof window.loadCheckinCalendar === 'function') {
-    //console.log('Initial load of heatmap');
-    window.loadCheckinCalendar(true); // Perform initial heatmap load
-  } else {
-    //console.error('loadCheckinCalendar is not defined on initial load');
-  }
-};
