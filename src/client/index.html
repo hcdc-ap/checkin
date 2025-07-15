@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EOC CHECK-IN</title>
+  <link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+  
+  <link rel="stylesheet" href="style.css"> 
+
+  <script src="https://code.highcharts.com/highcharts.js"></script>
+  <script src="https://code.highcharts.com/modules/heatmap.js"></script>
+  <script src="https://code.highcharts.com/modules/exporting.js"></script>
+  <script src="https://code.highcharts.com/modules/accessibility.js"></script>
+  <script src="https://code.highcharts.com/themes/adaptive.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+</head>
+<body>
+  <div class="main-wrapper">
+    <div class="webapp-content-flex">
+      <div class="container attendance-section">
+        <img src="https://i.ibb.co/Tw2CN2k/img-8-8-png-crop1.png" alt="EOC Logo" class="logo">
+        <h1>EOC CHECK-IN</h1>
+        <div class="info-section">
+          <p><i class="fas fa-user"></i> <span id="employeeIdDisplay">Loading...</span></p>
+          <p><i class="fas fa-key"></i> <span id="checkinCodeDisplay">Loading...</span></p>
+          <p><i class="fas fa-id-card"></i> <span id="employeeName">Loading...</span></p>
+          <p><i class="fas fa-network-wired"></i> <span id="ipAddress">Loading...</span></p>
+          <p><i class="fas fa-map-marker-alt"></i> <span id="currentAddress">Loading...</span></p>
+        </div>
+        <button class="checkin-button" id="checkinButton" disabled>CHECK-IN</button>
+        <div class="message" id="message"></div>
+      </div>
+      <div class="container map-section">
+        <h2>Map of roll call locations</h2>
+        <p style="font-size:10px;"><i>(🟢: Valid, 🔴: Out of Area, 🟠: Low Accuracy, 🔵 'HCDC': Office)</i></p>
+        <div style="text-align: center; margin-top: 20px;">
+          <div id="staticMapPlaceholder" class="static-map-placeholder loading">
+            <img src="https://i.ibb.co/8wLBpP9/Quby-beddance-1.gif" alt="Loading..." class="loading-gif">
+            <p>Loading map...</p>
+          </div>
+          <div id="map" style="display: none;"></div>
+        </div>
+      </div>
+    </div>
+    <div class="heatmap-section">
+      <div class="filter-bar">
+        <label>
+          Month:
+          <input type="month" id="calendarMonth" value="">
+        </label>
+        <label>
+          Employee:
+          <select id="employeeSelect">
+            <option value="">All</option>
+          </select>
+        </label>
+      </div>
+      <div id="heatmap-loading"><i class="fa fa-spinner fa-spin"></i> Loading...</div>
+      <div class="heatmap-scroll">
+        <div id="container" style="height: 400px;"></div>
+      </div>
+      <p class="highcharts-description">
+        The heatmap shows the number of check-ins per day of the month, for each employee.<br>
+        <i>Lighter days have more check-ins, grey days have no check-ins or no data.</i>
+      </p>
+    </div>
+  </div>
+
+  <script>
+    // For local development or GitHub Pages, these would need to be hardcoded or managed differently
+    // as the server-side GAS template variables (`<?!= ?>`) won't be processed.
+    // For your actual deployed GAS app, these lines will remain as they are.
+    const initialEmployeeId = '<?= employeeId ?>'; // This will remain in your GAS index.html
+    const initialCheckinCode = '<?= checkinCode ?>'; // This will remain in your GAS index.html
+    window.OFFICE_LATITUDE = <?!= OFFICE_LATITUDE ?>; // This will remain in your GAS index.html
+    window.OFFICE_LONGITUDE = <?!= OFFICE_LONGITUDE ?>; // This will remain in your GAS index.html
+    window.ACCEPTABLE_RADIUS_METERS = <?!= ACCEPTABLE_RADIUS_METERS ?>; // This will remain in your GAS index.html
+    window.LOW_ACCURACY_THRESHOLD_FACTOR = <?!= LOW_ACCURACY_THRESHOLD_FACTOR ?>; // This will remain in your GAS index.html
+  </script>
+
+  <script src="app.js"></script>
+
+  </body>
+</html>
